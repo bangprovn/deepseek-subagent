@@ -5,29 +5,39 @@
 .EXAMPLE
   .\run.ps1 -Dir C:\proj "Summarize src/auth and list every exported function."
   .\run.ps1 -Worker -Dir C:\proj -Timeout 600 "Add unit tests for src/utils/date.ts"
+  .\run.ps1 -Session ses_abc123 "Your RESULT mentions a race in cache.ts:40. Show the exact lines."
   Get-Content brief.md -Raw | .\run.ps1 -Dir C:\proj -
 
 .PARAMETER Worker   Use the deepseek-worker agent (can edit files / run shell).
 .PARAMETER Dir      Directory the subagent works in (default: current directory).
+.PARAMETER Session  Continue an existing session (two-way conversation).
+.PARAMETER Fork     With -Session: branch off instead of continuing in place.
 .PARAMETER Model    OpenCode model id (default: $env:DEEPSEEK_SUBAGENT_MODEL or deepseek/deepseek-flash).
 .PARAMETER File     File(s) to attach to the message.
 .PARAMETER Timeout  Seconds before the run is killed (default 900).
-.PARAMETER Out      Also write cleaned output to this path.
-.PARAMETER Raw      Keep ANSI codes and banner instead of stripping them.
+.PARAMETER Out      Also write the final output to this path.
+.PARAMETER Log      Append raw JSON events to this path (tail it to watch progress).
+.PARAMETER Json     Print one JSON object {session,text,exit,tokens,...} instead of text.
+.PARAMETER Quiet    No live progress lines on stderr.
 .PARAMETER DryRun   Print the opencode command and exit.
 .PARAMETER Prompt   The brief. Pass "-" to read it from stdin.
 
-Exit code is opencode's exit code, or 124 on timeout, 2 on bad arguments, 127 if opencode is missing.
+Output ends with a trailer:  ---  session: ses_...  exit: N
+Exit code is opencode's, or 124 on timeout, 2 on bad arguments, 127 if opencode is missing.
 #>
 [CmdletBinding()]
 param(
   [switch]$Worker,
   [string]$Dir = (Get-Location).Path,
+  [string]$Session = '',
+  [switch]$Fork,
   [string]$Model = $(if ($env:DEEPSEEK_SUBAGENT_MODEL) { $env:DEEPSEEK_SUBAGENT_MODEL } else { 'deepseek/deepseek-flash' }),
   [string[]]$File = @(),
   [int]$Timeout = 900,
   [string]$Out = '',
-  [switch]$Raw,
+  [string]$Log = '',
+  [switch]$Json,
+  [switch]$Quiet,
   [switch]$DryRun,
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Prompt
@@ -38,9 +48,7 @@ $Agent = if ($Worker) { 'deepseek-worker' } else { 'deepseek' }
 
 # --- prompt -------------------------------------------------------------------
 $text = ($Prompt -join ' ')
-if ($text -eq '-') {
-  $text = [Console]::In.ReadToEnd()
-}
+if ($text -eq '-') { $text = [Console]::In.ReadToEnd() }
 if ([string]::IsNullOrWhiteSpace($text)) {
   [Console]::Error.WriteLine("error: no prompt given (pass as argument or '-' to read stdin)")
   exit 2
@@ -48,22 +56,19 @@ if ([string]::IsNullOrWhiteSpace($text)) {
 
 # --- opencode binary ----------------------------------------------------------
 $cmd = Get-Command opencode -ErrorAction SilentlyContinue
-if (-not $cmd) {
-  [Console]::Error.WriteLine('error: opencode not found on PATH')
-  exit 127
-}
+if (-not $cmd) { [Console]::Error.WriteLine('error: opencode not found on PATH'); exit 127 }
 $exe = $cmd.Source
 # An npm .cmd shim goes through cmd.exe, which mangles &, |, %, ^ and newlines in
 # arguments. In that case ship the brief as an attached file instead of inline.
 $viaShim = $exe -match '\.(cmd|bat)$'
 
 try { $Dir = (Resolve-Path -LiteralPath $Dir).Path } catch {
-  [Console]::Error.WriteLine("error: bad -Dir '$Dir'")
-  exit 2
+  [Console]::Error.WriteLine("error: bad -Dir '$Dir'"); exit 2
 }
 
 # --- build args ---------------------------------------------------------------
-$ocArgs = @('run', '--agent', $Agent, '--model', $Model, '--dir', $Dir, '--format', 'default', '--title', 'claude-subagent')
+$ocArgs = @('run', '--format', 'json', '--agent', $Agent, '--model', $Model, '--dir', $Dir, '--title', 'claude-subagent')
+if ($Session) { $ocArgs += @('--session', $Session); if ($Fork) { $ocArgs += '--fork' } }
 foreach ($f in $File) { $ocArgs += @('--file', $f) }
 
 $briefFile = $null
@@ -76,7 +81,6 @@ if ($viaShim) {
 }
 
 function Quote-Arg([string]$a) {
-  # Windows CommandLineToArgvW rules: escape backslashes that precede a quote, escape quotes, wrap if needed.
   if ($a -notmatch '[\s"]' -and $a.Length -gt 0) { return $a }
   $s = [regex]::Replace($a, '(\\*)"', '$1$1\"')
   $s = [regex]::Replace($s, '(\\+)$', '$1$1')
@@ -89,7 +93,7 @@ if ($DryRun) {
   exit 0
 }
 
-# --- run with timeout ---------------------------------------------------------
+# --- process ------------------------------------------------------------------
 $env:OPENCODE_DISABLE_AUTOUPDATE = '1'
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $exe
@@ -105,47 +109,116 @@ if ($psi.PSObject.Properties['ArgumentList']) {
   $psi.Arguments = ($ocArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
 }
 
-$sb = New-Object System.Text.StringBuilder
+# Shared state for the event handlers.
+$state = @{
+  texts = New-Object System.Collections.Generic.List[string]
+  plain = New-Object System.Collections.Generic.List[string]
+  session = $Session
+  tools = 0
+  tokIn = 0; tokOut = 0; tokTotal = 0; cost = 0.0
+  log = $Log
+  quiet = [bool]$Quiet
+}
+
+$handler = {
+  $line = $EventArgs.Data
+  if ($null -eq $line) { return }
+  $st = $Event.MessageData
+  if ($st.log) { Add-Content -LiteralPath $st.log -Value $line -Encoding UTF8 }
+  if ([string]::IsNullOrWhiteSpace($line)) { return }
+  $ev = $null
+  try { $ev = $line | ConvertFrom-Json -ErrorAction Stop } catch { }
+  if ($null -eq $ev -or -not $ev.PSObject.Properties['type']) {
+    $st.plain.Add($line)
+    if (-not $st.quiet) { [Console]::Error.WriteLine($line) }
+    return
+  }
+  if ($ev.sessionID) { $st.session = $ev.sessionID }
+  $part = $ev.part
+  switch ($ev.type) {
+    'text' { if ($part.text) { $st.texts.Add([string]$part.text) } }
+    'tool_use' {
+      $st.tools++
+      $inp = $part.state.input
+      $summ = ''
+      if ($inp) {
+        foreach ($k in 'filePath','path','command','pattern','url','query','description') {
+          if ($inp.PSObject.Properties[$k] -and $inp.$k) { $summ = [string]$inp.$k; break }
+        }
+      }
+      $summ = ($summ -replace "`r?`n", ' ')
+      if ($summ.Length -gt 100) { $summ = $summ.Substring(0, 97) + '...' }
+      $mark = if ($part.state.status -eq 'error') { 'x' } else { '»' }
+      if (-not $st.quiet) { [Console]::Error.WriteLine(("$mark $($part.tool) $summ").TrimEnd()) }
+    }
+    'step_finish' {
+      $tk = $part.tokens
+      if ($tk) {
+        $st.tokIn += [int]($tk.input); $st.tokOut += [int]($tk.output); $st.tokTotal += [int]($tk.total)
+      }
+      if ($part.cost) { $st.cost += [double]$part.cost }
+    }
+    'error' {
+      $msg = ($ev.error | ConvertTo-Json -Compress -Depth 5)
+      $st.plain.Add("Error: $msg")
+      if (-not $st.quiet) { [Console]::Error.WriteLine("x error $msg") }
+    }
+  }
+}
+
 $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi
-$handler = { if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) } }
-$null = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $handler -MessageData $sb
-$null = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived  -Action $handler -MessageData $sb
+$subs = @()
+$subs += Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $handler -MessageData $state
+$subs += Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived  -Action $handler -MessageData $state
 
 [void]$proc.Start()
 $proc.StandardInput.Close()
 $proc.BeginOutputReadLine()
 $proc.BeginErrorReadLine()
 
-$rc = 0
-if (-not $proc.WaitForExit($Timeout * 1000)) {
-  if ($IsWindows -or $env:OS -eq 'Windows_NT') {
-    & taskkill /T /F /PID $proc.Id 2>$null | Out-Null
-  } else {
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+# Poll instead of WaitForExit(ms) so event actions run and progress is live.
+$deadline = (Get-Date).AddSeconds($Timeout)
+$timedOut = $false
+while (-not $proc.HasExited) {
+  if ((Get-Date) -gt $deadline) {
+    $timedOut = $true
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') { & taskkill /T /F /PID $proc.Id 2>$null | Out-Null }
+    else { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    break
   }
-  $proc.WaitForExit()
-  [Console]::Error.WriteLine("error: subagent timed out after ${Timeout}s")
-  $rc = 124
-} else {
-  $proc.WaitForExit()   # flush async readers
-  $rc = $proc.ExitCode
+  Start-Sleep -Milliseconds 150
 }
-Get-EventSubscriber | Where-Object { $_.SourceObject -eq $proc } | Unregister-Event
+$proc.WaitForExit()          # flush async readers
+Start-Sleep -Milliseconds 200 # let queued event actions drain
+$subs | ForEach-Object { Unregister-Event -SourceIdentifier $_.Name -ErrorAction SilentlyContinue }
 if ($briefFile) { Remove-Item -LiteralPath $briefFile -ErrorAction SilentlyContinue }
 
-# --- clean output -------------------------------------------------------------
-$outText = $sb.ToString()
-if (-not $Raw) {
-  $esc = [char]27
-  $outText = [regex]::Replace($outText, "$esc\[[0-9;?]*[A-Za-z]", '')
-  $lines = $outText -split "`r?`n"
-  $lines = $lines | Where-Object { $_ -notmatch '^> [a-z0-9-]+ · ' }
-  # drop leading blank lines
-  $i = 0; while ($i -lt $lines.Count -and [string]::IsNullOrWhiteSpace($lines[$i])) { $i++ }
-  $outText = (($lines | Select-Object -Skip $i) -join [Environment]::NewLine)
+$rc = if ($timedOut) { 124 } else { $proc.ExitCode }
+$final = ($state.texts -join "`n`n").Trim()
+if ($timedOut) { $state.plain.Add("error: subagent timed out after ${Timeout}s") }
+if ($rc -eq 0 -and -not $final -and $state.plain.Count -gt 0) { $rc = 1 }
+
+if ($Json) {
+  $obj = [ordered]@{
+    session = $state.session; exit = $rc; text = $final; errors = @($state.plain)
+    tools = $state.tools
+    tokens = [ordered]@{ input = $state.tokIn; output = $state.tokOut; total = $state.tokTotal }
+    cost = [math]::Round($state.cost, 6); dir = $Dir; agent = $Agent; model = $Model
+  }
+  $outText = $obj | ConvertTo-Json -Depth 5
+} else {
+  $parts = @()
+  if ($final) { $parts += $final }
+  if ($state.plain.Count -gt 0) { $parts += ($state.plain -join "`n") }
+  $sess = if ($state.session) { $state.session } else { 'unknown' }
+  $parts += '---'
+  $parts += "session: $sess"
+  $parts += ("agent: {0}  model: {1}  tools: {2}  tokens: in={3} out={4}  cost: `${5:N4}" -f $Agent, $Model, $state.tools, $state.tokIn, $state.tokOut, $state.cost)
+  $parts += "exit: $rc"
+  $outText = $parts -join "`n"
 }
 
 Write-Output $outText
-if ($Out) { [IO.File]::WriteAllText($Out, $outText, (New-Object Text.UTF8Encoding $false)) }
+if ($Out) { [IO.File]::WriteAllText($Out, $outText + "`n", (New-Object Text.UTF8Encoding $false)) }
 exit $rc

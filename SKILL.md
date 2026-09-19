@@ -3,12 +3,12 @@ name: deepseek-subagent
 description: Delegate a bounded task to a DeepSeek Flash subagent that runs through OpenCode (DeepSeek API). Use when work can be handed off cheaply and in parallel: codebase exploration, summarizing many files, drafting boilerplate or tests, first-pass code review, or research the main agent doesn't need to do itself. Also use when the user says "use deepseek", "deepseek subagent", or asks to offload work to DeepSeek/OpenCode.
 argument-hint: [task description]
 license: MIT
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/run.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/run.sh *)
+allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/run.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/run.sh *), Bash(tail *)
 ---
 
 # DeepSeek subagent via OpenCode
 
-DeepSeek Flash is not an Anthropic model, so Claude Code cannot spawn it with the Agent tool. Instead, run it as a headless OpenCode session with the wrapper script. Treat each run exactly like a subagent: brief it fully, run it, then read and verify its result.
+DeepSeek Flash is not an Anthropic model, so Claude Code cannot spawn it with the Agent tool. Instead, run it as a headless OpenCode session with the wrapper script. Treat each run exactly like a subagent: brief it fully, run it, read and verify its result, and continue the same session when you need to follow up. Every run prints a `session:` id in its trailer for exactly that.
 
 ## Preflight
 
@@ -35,9 +35,49 @@ cat brief.md | "${CLAUDE_SKILL_DIR}/scripts/run.sh" --dir /abs/path -
 
 # attach files, save output, custom timeout (seconds)
 "${CLAUDE_SKILL_DIR}/scripts/run.sh" -f src/foo.ts -o /tmp/out.md -t 600 "<brief>"
+
+# reply to a subagent in its existing session
+"${CLAUDE_SKILL_DIR}/scripts/run.sh" -s ses_xxxxxxxx "<follow-up>"
 ```
 
-Defaults: agent `deepseek` (read-only), model `deepseek/deepseek-flash`, timeout 900s, `--dir` = current directory. Override the model with `-m provider/model` or the `DEEPSEEK_SUBAGENT_MODEL` env var. `--dry-run` prints the command without running it.
+Defaults: agent `deepseek` (read-only), model `deepseek/deepseek-flash`, timeout 900s, `--dir` = current directory. Override the model with `-m provider/model` or the `DEEPSEEK_SUBAGENT_MODEL` env var. `--dry-run` prints the command without running it. `-j` prints one JSON object instead of text. `-l FILE` appends raw events to a log you can `tail -f`.
+
+Every run ends with a trailer:
+
+```
+---
+session: ses_f464f63c9ffefGqXj2UlKd844d
+agent: deepseek  model: deepseek/deepseek-flash  tools: 3  tokens: in=4102 out=337  cost: $0.0008
+exit: 0
+```
+
+Keep the `session:` id. It is the handle for talking to that subagent again.
+
+## Talking back and forth
+
+The channel is turn-based. Each `run.sh` call is one message from you; the subagent's output is its reply. Pass `-s <session id>` to send the next message into the same conversation. The subagent keeps everything it read and did.
+
+Use it for:
+
+- **Answering a question.** Agents are told to stop and end with a `QUESTION` section when they are blocked on something only you can decide. Reply with the answer via `-s` and they resume.
+- **Drilling in.** "Your RESULT says `cache.ts:40` has a race. Show the exact lines and explain the interleaving."
+- **Iterating on worker changes.** Review the diff, then: "`npm test` fails on `date.test.ts:12`, expected `2024-01-01`. Fix the timezone handling and rerun the tests."
+- **Handing over more context.** Attach a file with `-f` or paste findings from another subagent into the message.
+- **Branching.** `-s <id> --fork "<message>"` continues from the same history in a new session, leaving the original intact. Use it to try two approaches from one exploration.
+
+Subagents cannot talk to each other. You are the router: run A, take what you need from A's reply, put it into B's brief or a `-s` message to B.
+
+Do not use `-s` to give a subagent a new, unrelated task. Start a fresh session so its context stays small and cheap.
+
+## Watching a long run
+
+Launch with `-l /path/to/events.log` and `run_in_background: true`. The log gets one JSON line per event; the live progress lines on stderr show each tool call as `» read src/foo.ts`, `» bash npm test`, or `x edit ...` on failure. Check on it with:
+
+```bash
+tail -n 20 /path/to/events.log | cut -c1-200
+```
+
+If it is heading the wrong way, let it finish or time out, then correct it with `-s`. There is no mid-turn interrupt.
 
 ### Windows
 
@@ -46,6 +86,7 @@ On native Windows prefer the PowerShell port, which has the same flags and kills
 ```powershell
 & "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Dir C:/abs/path/to/project "<brief>"
 & "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Worker -Dir C:/abs/path/to/project -Timeout 600 "<brief>"
+& "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Session ses_xxxxxxxx "<follow-up>"
 ```
 
 Run it with `pwsh -File` or `powershell -File` from Bash if that is the shell you have. `run.sh` also works under Git Bash, but its timeout cannot reliably stop a hung Node process there. Use forward slashes in `--dir` either way.
@@ -78,6 +119,7 @@ The agents are instructed to finish with a `RESULT` section. Ask for a specific 
 - Read the `RESULT` section, then check the claims against the code yourself before relaying them. Spot-check at least the `path:line` citations that matter.
 - For worker runs, run `git status` and `git diff` in `--dir` and review every change. Revert anything out of scope with `git checkout -- <file>`.
 - Report to the user what DeepSeek did and what you verified. Attribute it plainly: "the DeepSeek subagent found…". Do not present its output as your own verified work unless you checked it.
+- If the reply ends with a `QUESTION` section, answer it with `-s <session>` rather than re-briefing from scratch.
 - Exit code 124 means timeout. Exit 2 means bad arguments. Anything else non-zero is an OpenCode or API error; the output contains the message.
 
 ## When not to use this

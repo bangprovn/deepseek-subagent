@@ -11,8 +11,9 @@ Works on macOS, Linux, WSL, and native Windows.
 | Path | Purpose |
 |---|---|
 | `SKILL.md` | The skill Claude Code loads. Tells Claude when and how to delegate, how to brief, and to verify results. |
-| `scripts/run.sh` | Bash wrapper around `opencode run` (macOS, Linux, Git Bash). |
-| `scripts/run.ps1` | PowerShell wrapper with the same flags (Windows PowerShell 5.1 and PowerShell 7). Kills the whole process tree on timeout. |
+| `scripts/run.sh` | Bash front-end (macOS, Linux, Git Bash). Needs `python3`. |
+| `scripts/deepseek_run.py` | The core: runs `opencode run --format json`, streams tool-call progress, enforces the timeout, prints the reply plus a session trailer. |
+| `scripts/run.ps1` | Self-contained PowerShell port with the same flags (Windows PowerShell 5.1 and PowerShell 7). Kills the whole process tree on timeout. |
 | `opencode/agents/deepseek.md` | Read-only OpenCode agent on `deepseek/deepseek-flash`. Cannot edit or run shell. |
 | `opencode/agents/deepseek-worker.md` | Same model, may edit files and run shell. `git commit`, `git push`, `git reset --hard`, `rm -rf`, `sudo` denied. |
 | `install.sh` / `install.ps1` | Copy the OpenCode agents into place and check your setup. |
@@ -75,10 +76,38 @@ Get-Content brief.md -Raw | scripts\run.ps1 -Dir C:\path\to\project -
 | `-f`, `--file PATH` | `-File` | attach file(s) to the message |
 | `-t`, `--timeout SECS` | `-Timeout` | default 900 |
 | `-o`, `--out PATH` | `-Out` | also write output to a file |
-| `--raw` | `-Raw` | keep ANSI codes |
+| `-s`, `--session ID` | `-Session` | continue an existing session (see below) |
+| `--fork` | `-Fork` | with a session: branch instead of continuing in place |
+| `-l`, `--log PATH` | `-Log` | append raw JSON events; `tail -f` it to watch progress |
+| `-j`, `--json` | `-Json` | print one JSON object `{session, text, exit, tokens, cost, ...}` |
+| `-q`, `--quiet` | `-Quiet` | no live progress on stderr |
 | `--dry-run` | `-DryRun` | print the command only |
 
 Set `DEEPSEEK_SUBAGENT_MODEL` to change the default model without editing anything. Exit code 124 means timeout, 2 bad arguments, 127 OpenCode missing.
+
+## Two-way communication
+
+Every run ends with a trailer that names the OpenCode session:
+
+```
+---
+session: ses_f464f63c9ffefGqXj2UlKd844d
+agent: deepseek  model: deepseek/deepseek-flash  tools: 3  tokens: in=4102 out=337  cost: $0.0008
+exit: 0
+```
+
+Pass that id back with `-s` and the next message lands in the same conversation, with everything the subagent already read and did still in context:
+
+```bash
+scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d "Your RESULT flags cache.ts:40. Show the exact lines and the interleaving."
+scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d --fork "Now try the alternative: a per-key mutex instead."
+```
+
+The channel is turn-based: one call is one message, the output is the reply. The agents are instructed to stop and end with a `QUESTION` section when they are blocked on something only the caller can decide, so Claude answers with `-s` and they resume. Claude also uses it to drill into findings, hand over extra context, and iterate on a worker's changes after reviewing the diff.
+
+While a run is in progress, `-l events.log` records every event and stderr shows each tool call live (`» read src/foo.ts`, `» bash npm test`). There is no mid-turn interrupt; let it finish or time out, then steer with `-s`.
+
+Subagents do not talk to each other. Claude routes: it runs A, then feeds what matters from A's reply into B's brief or a `-s` message to B.
 
 ## Changing the model
 
@@ -86,7 +115,7 @@ OpenCode's DeepSeek provider currently exposes `deepseek/deepseek-flash`, `deeps
 
 ## Platform notes
 
-- **macOS / Linux / WSL:** everything works as-is.
+- **macOS / Linux / WSL:** everything works as-is. `run.sh` needs `python3`, which both ship.
 - **Windows, Git Bash:** `run.sh` works, but Git Bash cannot reliably kill a Node process tree, so a hung run may outlive `-t`. Prefer `run.ps1`.
 - **Windows, PowerShell:** if `opencode` on your PATH is an npm `.cmd` shim, `run.ps1` passes the brief as an attached file instead of inline to avoid `cmd.exe` mangling special characters. The native OpenCode installer avoids this.
 - OpenCode reads global agents from `~/.config/opencode/agents` on every platform (`%USERPROFILE%\.config\opencode\agents` on Windows). Set `OPENCODE_CONFIG_DIR` before running the installer if yours lives elsewhere.

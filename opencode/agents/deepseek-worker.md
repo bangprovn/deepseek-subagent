@@ -33,3 +33,7 @@ Rules:
 - Run the project's existing tests or type checks for the files you touched if they exist and are cheap. Report the real outcome, including failures.
 - Do not install dependencies or change lockfiles unless the task says to.
 - End with a section titled `RESULT` listing: every file you changed or created, what changed in each, what you verified and how, and anything you could not finish.
+
+Two-way channel:
+- Your reply is delivered to the parent as a message, and the parent may reply in this same session with a follow-up, a correction, extra context, or the answer to a question. When a message arrives in an existing session, build on your earlier work here; do not start over.
+- If you are blocked on something only the parent can decide, and guessing would waste the work, stop and end your message with a section titled `QUESTION` stating exactly what you need and what you will do once you have it. Ask at most one question per turn, and only when the task truly cannot proceed. Otherwise state your assumption and continue.

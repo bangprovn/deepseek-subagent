@@ -8,37 +8,41 @@
 # Options:
 #   -w, --worker        use the deepseek-worker agent (can edit files / run bash)
 #   -d, --dir DIR       directory the subagent works in (default: current dir)
+#   -s, --session ID    continue an existing session (two-way conversation)
+#       --fork          with --session: branch off instead of continuing in place
 #   -m, --model ID      OpenCode model id (default: $DEEPSEEK_SUBAGENT_MODEL or deepseek/deepseek-flash)
 #   -f, --file PATH     attach a file to the message (repeatable)
 #   -t, --timeout SECS  kill the run after SECS seconds (default: 900)
-#   -o, --out PATH      also write the cleaned output to PATH
-#   --raw               keep ANSI/formatting instead of stripping it
-#   --dry-run           print the opencode command and exit
+#   -o, --out PATH      also write the final output to PATH
+#   -l, --log PATH      append raw JSON events to PATH (tail it to watch progress)
+#   -j, --json          print one JSON object {session,text,exit,tokens,...} instead of text
+#   -q, --quiet         no live progress lines on stderr
+#       --dry-run       print the opencode command and exit
 #
+# Output ends with a trailer:  ---  session: ses_...  exit: N
+# Pass that session id to -s to reply to the subagent in the same conversation.
 # Exit code is opencode's exit code, or 124 on timeout.
 set -uo pipefail
 
-AGENT="deepseek"
-DIR="$PWD"
-MODEL="${DEEPSEEK_SUBAGENT_MODEL:-deepseek/deepseek-flash}"
-TIMEOUT=900
-OUT=""
-RAW=0
-DRY=0
-FILES=()
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ARGS=()
 PROMPT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -w|--worker) AGENT="deepseek-worker"; shift ;;
-    -d|--dir) DIR="$2"; shift 2 ;;
-    -m|--model) MODEL="$2"; shift 2 ;;
-    -f|--file) FILES+=("--file" "$2"); shift 2 ;;
-    -t|--timeout) TIMEOUT="$2"; shift 2 ;;
-    -o|--out) OUT="$2"; shift 2 ;;
-    --raw) RAW=1; shift ;;
-    --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -w|--worker) ARGS+=(--agent deepseek-worker); shift ;;
+    -d|--dir) ARGS+=(--dir "$2"); shift 2 ;;
+    -s|--session) ARGS+=(--session "$2"); shift 2 ;;
+    --fork) ARGS+=(--fork); shift ;;
+    -m|--model) ARGS+=(--model "$2"); shift 2 ;;
+    -f|--file) ARGS+=(--file "$2"); shift 2 ;;
+    -t|--timeout) ARGS+=(--timeout "$2"); shift 2 ;;
+    -o|--out) ARGS+=(--out "$2"); shift 2 ;;
+    -l|--log) ARGS+=(--log "$2"); shift 2 ;;
+    -j|--json) ARGS+=(--json); shift ;;
+    -q|--quiet) ARGS+=(--quiet); shift ;;
+    --dry-run) ARGS+=(--dry-run); shift ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     -) PROMPT="$(cat)"; shift ;;
     --) shift; PROMPT="$*"; break ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -50,49 +54,16 @@ if [ -z "$PROMPT" ]; then
   echo "error: no prompt given (pass as argument or '-' to read stdin)" >&2
   exit 2
 fi
-if ! command -v opencode >/dev/null 2>&1; then
-  echo "error: opencode not found on PATH" >&2
+
+PY=""
+for c in python3 python; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3,6) else 1)' 2>/dev/null; then
+    PY="$c"; break
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "error: python3 is required by run.sh. On Windows use scripts/run.ps1 instead." >&2
   exit 127
 fi
-DIR="$(cd "$DIR" 2>/dev/null && pwd)" || { echo "error: bad --dir" >&2; exit 2; }
 
-CMD=(opencode run --agent "$AGENT" --model "$MODEL" --dir "$DIR" --format default --title "claude-subagent" ${FILES[@]+"${FILES[@]}"} -- "$PROMPT")
-
-if [ "$DRY" = 1 ]; then
-  printf '%q ' "${CMD[@]}"; echo
-  exit 0
-fi
-
-# Portable timeout: macOS has no coreutils `timeout` by default.
-run_with_timeout() {
-  local secs="$1"; shift
-  "$@" &
-  local pid=$!
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) &
-  local watchdog=$!
-  wait "$pid" 2>/dev/null
-  local rc=$?
-  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
-  if [ $rc -eq 143 ] || [ $rc -eq 137 ]; then
-    echo "error: subagent timed out after ${secs}s" >&2
-    return 124
-  fi
-  return $rc
-}
-
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
-
-# Non-interactive: never let a permission prompt hang the run.
-export OPENCODE_DISABLE_AUTOUPDATE=1
-run_with_timeout "$TIMEOUT" "${CMD[@]}" >"$TMP" 2>&1 </dev/null
-RC=$?
-
-if [ "$RAW" = 1 ]; then
-  cat "$TMP"
-else
-  # Strip ANSI escape sequences and the leading "> agent · model" banner line.
-  sed -E $'s/\e\\[[0-9;?]*[A-Za-z]//g' "$TMP" | sed -E '1{/^[[:space:]]*$/d;}' | sed -E '/^> [a-z0-9-]+ · /d'
-fi | tee "${OUT:-/dev/null}"
-
-exit $RC
+exec "$PY" "$HERE/deepseek_run.py" ${ARGS[@]+"${ARGS[@]}"} -- "$PROMPT"
