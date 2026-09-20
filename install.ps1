@@ -1,5 +1,5 @@
 # Install the deepseek-subagent skill's OpenCode side (Windows PowerShell 5.1+ / PowerShell 7).
-# Run from the skill directory, e.g. ~\.codex\skills\deepseek-subagent\install.ps1
+# Run from either host's installed skill directory, e.g. ~\.codex\skills\deepseek-subagent\install.ps1
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Base = if ($env:OPENCODE_CONFIG_DIR) { $env:OPENCODE_CONFIG_DIR } else { Join-Path $HOME '.config\opencode' }
@@ -19,4 +19,4 @@ $auth = (& opencode auth list 2>$null) -join "`n"
 if ($auth -match '(?i)deepseek') { Write-Host 'DeepSeek credentials: ok' }
 else { Write-Warning 'DeepSeek credentials: missing. Run:  opencode auth login   and choose DeepSeek.' }
 Write-Host ''
-Write-Host "Done. In Codex, ask it to 'use deepseek' or invoke the deepseek-subagent skill."
+Write-Host "Done. In Claude Code use /deepseek-subagent; in Codex invoke the deepseek-subagent skill. Both accept 'use deepseek'."

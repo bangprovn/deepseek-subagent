@@ -1,6 +1,6 @@
 # deepseek-subagent
 
-A Codex skill that delegates bounded tasks to **DeepSeek Flash** through [OpenCode](https://opencode.ai), using DeepSeek's own API. Codex launches a headless process, reads the result, and verifies findings or worker changes. No Codex model-provider configuration is changed.
+A skill for **Claude Code and Codex** that delegates bounded tasks to **DeepSeek Flash** through [OpenCode](https://opencode.ai), using DeepSeek's own API. The parent assistant launches a headless process, reads the result, and verifies findings or worker changes. No Codex model-provider configuration is changed.
 
 Works on macOS, Linux, WSL, and native Windows.
 
@@ -9,7 +9,8 @@ Works on macOS, Linux, WSL, and native Windows.
 | Path | Purpose |
 |---|---|
 | `agents/openai.yaml` | Codex display metadata and default invocation prompt. |
-| `SKILL.md` | The skill Codex loads. Tells Codex when and how to delegate, how to brief, and to verify results. |
+| `SKILL.md` | Shared entry point with the Claude Code workflow and a route to Codex instructions. |
+| `references/codex.md` | Codex-specific paths, shell execution, polling, and verification. |
 | `scripts/run.sh` | Bash front-end (macOS, Linux, Git Bash). Needs `python3`. |
 | `scripts/deepseek_run.py` | The core: runs `opencode run --format json`, streams tool-call progress, enforces the timeout, prints the reply plus a session trailer. |
 | `scripts/run.ps1` | Self-contained PowerShell port with the same flags (Windows PowerShell 5.1 and PowerShell 7). Kills the whole process tree on timeout. |
@@ -19,7 +20,32 @@ Works on macOS, Linux, WSL, and native Windows.
 
 Both agents deny OpenCode's `question` and `doom_loop` permissions so a headless run can never stall waiting for a human.
 
-## Install
+## Install for Claude Code
+
+1. Install [OpenCode](https://opencode.ai/docs/#install), then run `opencode auth login` and choose DeepSeek.
+2. Clone and install the agents:
+
+   ```bash
+   git clone https://github.com/bangprovn/deepseek-subagent.git ~/.claude/skills/deepseek-subagent
+   bash ~/.claude/skills/deepseek-subagent/install.sh
+   ```
+
+   Windows PowerShell:
+
+   ```powershell
+   git clone https://github.com/bangprovn/deepseek-subagent.git "$HOME/.claude/skills/deepseek-subagent"
+   & "$HOME/.claude/skills/deepseek-subagent/install.ps1"
+   ```
+
+Restart Claude Code, then invoke:
+
+```text
+/deepseek-subagent review src/auth for missing error handling
+```
+
+Claude Code retains its skill-directory variable, argument placeholder, allowed Bash tools, and background-run workflow. Both hosts share the same wrappers and OpenCode agents; installing one does not require removing the other.
+
+## Install for Codex
 
 1. Install [OpenCode](https://opencode.ai/docs/#install) and add your DeepSeek key:
    ```bash
@@ -102,11 +128,11 @@ scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d "Your RESULT flags cache.ts:40.
 scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d --fork "Now try the alternative: a per-key mutex instead."
 ```
 
-The channel is turn-based: one call is one message, the output is the reply. The agents are instructed to stop and end with a `QUESTION` section when they are blocked on something only the caller can decide, so Codex answers with `-s` and they resume. Codex also uses it to drill into findings, hand over extra context, and iterate on a worker's changes after reviewing the diff.
+The channel is turn-based: one call is one message, the output is the reply. The agents are instructed to stop and end with a `QUESTION` section when they are blocked on something only the caller can decide, so the parent assistant answers with `-s` and they resume. The parent also uses it to drill into findings, hand over extra context, and iterate on a worker's changes after reviewing the diff.
 
 While a run is in progress, `-l events.log` records every event and stderr shows each tool call live (`» read src/foo.ts`, `» bash npm test`). There is no mid-turn interrupt; let it finish or time out, then steer with `-s`.
 
-Subagents do not talk to each other. Codex routes: it runs A, then feeds what matters from A's reply into B's brief or a `-s` message to B.
+Subagents do not talk to each other. The parent routes: it runs A, then feeds what matters from A's reply into B's brief or a `-s` message to B.
 
 ## Changing the model
 
