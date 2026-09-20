@@ -1,8 +1,6 @@
 # deepseek-subagent
 
-A [Claude Code](https://code.claude.com) skill that lets Claude delegate bounded tasks to **DeepSeek Flash** running headlessly through [OpenCode](https://opencode.ai), using DeepSeek's own API.
-
-Claude Code's Agent tool and `CLAUDE_CODE_SUBAGENT_MODEL` only reach Anthropic-served models. This skill sidesteps that: Claude briefs DeepSeek the way it would brief a subagent, runs it as an `opencode run` session in your project directory, then reads and verifies the result.
+A Codex skill that delegates bounded tasks to **DeepSeek Flash** through [OpenCode](https://opencode.ai), using DeepSeek's own API. Codex launches a headless process, reads the result, and verifies findings or worker changes. No Codex model-provider configuration is changed.
 
 Works on macOS, Linux, WSL, and native Windows.
 
@@ -10,7 +8,8 @@ Works on macOS, Linux, WSL, and native Windows.
 
 | Path | Purpose |
 |---|---|
-| `SKILL.md` | The skill Claude Code loads. Tells Claude when and how to delegate, how to brief, and to verify results. |
+| `agents/openai.yaml` | Codex display metadata and default invocation prompt. |
+| `SKILL.md` | The skill Codex loads. Tells Codex when and how to delegate, how to brief, and to verify results. |
 | `scripts/run.sh` | Bash front-end (macOS, Linux, Git Bash). Needs `python3`. |
 | `scripts/deepseek_run.py` | The core: runs `opencode run --format json`, streams tool-call progress, enforces the timeout, prints the reply plus a session trailer. |
 | `scripts/run.ps1` | Self-contained PowerShell port with the same flags (Windows PowerShell 5.1 and PowerShell 7). Kills the whole process tree on timeout. |
@@ -26,28 +25,28 @@ Both agents deny OpenCode's `question` and `doom_loop` permissions so a headless
    ```bash
    opencode auth login   # choose DeepSeek
    ```
-2. Clone this repo into Claude Code's user-level skills folder:
+2. Clone this repo into Codex's user-level skills folder (use $CODEX_HOME/skills instead if CODEX_HOME is set):
    ```bash
-   git clone https://github.com/bangprovn/deepseek-subagent.git ~/.claude/skills/deepseek-subagent
+   git clone https://github.com/bangprovn/deepseek-subagent.git ~/.codex/skills/deepseek-subagent
    ```
-   Windows: `git clone https://github.com/bangprovn/deepseek-subagent.git $HOME\.claude\skills\deepseek-subagent`
+   Windows: `git clone https://github.com/bangprovn/deepseek-subagent.git $HOME\.codex\skills\deepseek-subagent`
 3. Install the OpenCode agents:
    ```bash
-   ~/.claude/skills/deepseek-subagent/install.sh
+   ~/.codex/skills/deepseek-subagent/install.sh
    ```
-   Windows: `& $HOME\.claude\skills\deepseek-subagent\install.ps1`
+   Windows: `& $HOME\.codex\skills\deepseek-subagent\install.ps1`
 
-Restart Claude Code. The skill now appears as `/deepseek-subagent`.
+The skill is available on your next Codex turn. The skill now appears as `$deepseek-subagent`.
 
 ## Use
 
-In Claude Code:
+In Codex:
 
 ```
-/deepseek-subagent review src/auth for missing error handling
+$deepseek-subagent review src/auth for missing error handling
 ```
 
-or just say "use deepseek for this". Claude writes a self-contained brief, runs it, and checks the answer against the code before relaying it.
+or just say "use deepseek for this". Codex writes a self-contained brief, runs it, and checks the answer against the code before relaying it.
 
 Direct use of the wrapper:
 
@@ -103,15 +102,15 @@ scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d "Your RESULT flags cache.ts:40.
 scripts/run.sh -s ses_f464f63c9ffefGqXj2UlKd844d --fork "Now try the alternative: a per-key mutex instead."
 ```
 
-The channel is turn-based: one call is one message, the output is the reply. The agents are instructed to stop and end with a `QUESTION` section when they are blocked on something only the caller can decide, so Claude answers with `-s` and they resume. Claude also uses it to drill into findings, hand over extra context, and iterate on a worker's changes after reviewing the diff.
+The channel is turn-based: one call is one message, the output is the reply. The agents are instructed to stop and end with a `QUESTION` section when they are blocked on something only the caller can decide, so Codex answers with `-s` and they resume. Codex also uses it to drill into findings, hand over extra context, and iterate on a worker's changes after reviewing the diff.
 
 While a run is in progress, `-l events.log` records every event and stderr shows each tool call live (`» read src/foo.ts`, `» bash npm test`). There is no mid-turn interrupt; let it finish or time out, then steer with `-s`.
 
-Subagents do not talk to each other. Claude routes: it runs A, then feeds what matters from A's reply into B's brief or a `-s` message to B.
+Subagents do not talk to each other. Codex routes: it runs A, then feeds what matters from A's reply into B's brief or a `-s` message to B.
 
 ## Changing the model
 
-OpenCode's DeepSeek provider currently exposes `deepseek/deepseek-flash`, `deepseek/deepseek-v4-flash`, and `deepseek/deepseek-v4-pro`. To switch permanently, edit the `model:` line in both files under `opencode/agents/` and re-run the installer.
+Depending on your OpenCode provider catalog, model IDs may include `deepseek/deepseek-flash`, `deepseek/deepseek-v4-flash`, and `deepseek/deepseek-v4-pro`. Run `opencode models deepseek` to check availability. Set `DEEPSEEK_SUBAGENT_MODEL` or pass the model flag to override the wrapper default.
 
 ## Platform notes
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeepSeek Subagent"
+  short_description: "Delegate bounded tasks to DeepSeek via OpenCode"
+  default_prompt: "Use $deepseek-subagent to delegate a bounded task to DeepSeek and verify its result."

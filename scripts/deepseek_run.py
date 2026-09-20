@@ -65,7 +65,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--out")
     ap.add_argument("--log")
-    ap.add_argument("--title", default="claude-subagent")
+    ap.add_argument("--title", default="deepseek-subagent")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--dry-run", action="store_true")

@@ -1,133 +1,50 @@
 ---
 name: deepseek-subagent
-description: Delegate a bounded task to a DeepSeek Flash subagent that runs through OpenCode (DeepSeek API). Use when work can be handed off cheaply and in parallel: codebase exploration, summarizing many files, drafting boilerplate or tests, first-pass code review, or research the main agent doesn't need to do itself. Also use when the user says "use deepseek", "deepseek subagent", or asks to offload work to DeepSeek/OpenCode.
-argument-hint: [task description]
-license: MIT
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/run.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/run.sh *), Bash(tail *)
+description: Delegate bounded exploration, review, research, or implementation tasks to DeepSeek through OpenCode. Use when the user asks to use DeepSeek, a DeepSeek subagent, or offload work to DeepSeek/OpenCode.
 ---
 
-# DeepSeek subagent via OpenCode
+# DeepSeek subagent for Codex
 
-DeepSeek Flash is not an Anthropic model, so Claude Code cannot spawn it with the Agent tool. Instead, run it as a headless OpenCode session with the wrapper script. Treat each run exactly like a subagent: brief it fully, run it, read and verify its result, and continue the same session when you need to follow up. Every run prints a `session:` id in its trailer for exactly that.
+Run DeepSeek as a headless OpenCode process, then verify its output. This uses the configured DeepSeek credentials and API, not a native Codex collaboration agent. The child receives only its brief, attached files, and OpenCode session history.
 
-## Preflight
+## Locate and check
 
-```!
-command -v opencode >/dev/null && opencode --version || echo "opencode NOT INSTALLED"
-opencode auth list 2>/dev/null | grep -qi deepseek && echo "deepseek auth: ok" || echo "deepseek auth: MISSING (user must run: opencode auth login -> DeepSeek)"
-```
+Resolve scripts relative to the directory containing this SKILL.md. Do not use Claude-specific variables or assume the project directory is the skill directory. The usual location is $CODEX_HOME/skills/deepseek-subagent, or ~/.codex/skills/deepseek-subagent when CODEX_HOME is unset.
 
-If the auth line says MISSING, stop and tell the user to run `opencode auth login` and pick DeepSeek. Never enter an API key yourself.
+Run `opencode --version` and `opencode auth list` without reading credential files. Check that `opencode agent list` includes deepseek and deepseek-worker. If agents are missing, run this skill's install.ps1 on Windows or bash install.sh on Unix. If OpenCode or authentication is missing, report the prerequisite; the user can run `opencode auth login` and choose DeepSeek. Never include keys in briefs or logs.
 
-## How to run
+## Run a bounded task
 
-Script: `${CLAUDE_SKILL_DIR}/scripts/run.sh`
+Always pass the absolute project path, including on follow-ups. The directory option sets the working directory; it is not an OS sandbox. Use read-only mode for findings and worker mode only for authorized edits. Worker shell deny patterns are guardrails, not comprehensive isolation.
 
-```bash
-# read-only subagent (explore, review, research, summarize)
-"${CLAUDE_SKILL_DIR}/scripts/run.sh" --dir /abs/path/to/project "<self-contained brief>"
-
-# worker subagent (may edit files and run commands in --dir)
-"${CLAUDE_SKILL_DIR}/scripts/run.sh" --worker --dir /abs/path/to/project "<self-contained brief>"
-
-# long brief: pipe it on stdin
-cat brief.md | "${CLAUDE_SKILL_DIR}/scripts/run.sh" --dir /abs/path -
-
-# attach files, save output, custom timeout (seconds)
-"${CLAUDE_SKILL_DIR}/scripts/run.sh" -f src/foo.ts -o /tmp/out.md -t 600 "<brief>"
-
-# reply to a subagent in its existing session
-"${CLAUDE_SKILL_DIR}/scripts/run.sh" -s ses_xxxxxxxx "<follow-up>"
-```
-
-Defaults: agent `deepseek` (read-only), model `deepseek/deepseek-flash`, timeout 900s, `--dir` = current directory. Override the model with `-m provider/model` or the `DEEPSEEK_SUBAGENT_MODEL` env var. `--dry-run` prints the command without running it. `-j` prints one JSON object instead of text. `-l FILE` appends raw events to a log you can `tail -f`.
-
-Every run ends with a trailer:
-
-```
----
-session: ses_f464f63c9ffefGqXj2UlKd844d
-agent: deepseek  model: deepseek/deepseek-flash  tools: 3  tokens: in=4102 out=337  cost: $0.0008
-exit: 0
-```
-
-Keep the `session:` id. It is the handle for talking to that subagent again.
-
-## Talking back and forth
-
-The channel is turn-based. Each `run.sh` call is one message from you; the subagent's output is its reply. Pass `-s <session id>` to send the next message into the same conversation. The subagent keeps everything it read and did.
-
-Use it for:
-
-- **Answering a question.** Agents are told to stop and end with a `QUESTION` section when they are blocked on something only you can decide. Reply with the answer via `-s` and they resume.
-- **Drilling in.** "Your RESULT says `cache.ts:40` has a race. Show the exact lines and explain the interleaving."
-- **Iterating on worker changes.** Review the diff, then: "`npm test` fails on `date.test.ts:12`, expected `2024-01-01`. Fix the timezone handling and rerun the tests."
-- **Handing over more context.** Attach a file with `-f` or paste findings from another subagent into the message.
-- **Branching.** `-s <id> --fork "<message>"` continues from the same history in a new session, leaving the original intact. Use it to try two approaches from one exploration.
-
-Subagents cannot talk to each other. You are the router: run A, take what you need from A's reply, put it into B's brief or a `-s` message to B.
-
-Do not use `-s` to give a subagent a new, unrelated task. Start a fresh session so its context stays small and cheap.
-
-## Watching a long run
-
-Launch with `-l /path/to/events.log` and `run_in_background: true`. The log gets one JSON line per event; the live progress lines on stderr show each tool call as `» read src/foo.ts`, `» bash npm test`, or `x edit ...` on failure. Check on it with:
-
-```bash
-tail -n 20 /path/to/events.log | cut -c1-200
-```
-
-If it is heading the wrong way, let it finish or time out, then correct it with `-s`. There is no mid-turn interrupt.
-
-### Windows
-
-On native Windows prefer the PowerShell port, which has the same flags and kills the whole process tree on timeout:
+On Windows, use an absolute script path:
 
 ```powershell
-& "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Dir C:/abs/path/to/project "<brief>"
-& "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Worker -Dir C:/abs/path/to/project -Timeout 600 "<brief>"
-& "${CLAUDE_SKILL_DIR}/scripts/run.ps1" -Session ses_xxxxxxxx "<follow-up>"
+$skillDir = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'skills/deepseek-subagent' } else { Join-Path $HOME '.codex/skills/deepseek-subagent' }
+& "$skillDir/scripts/run.ps1" -Dir C:/project -Out C:/scratch/result.md -Log C:/scratch/events.log 'Review src/auth. Cite paths and lines; make no edits.'
+& "$skillDir/scripts/run.ps1" -Worker -Dir C:/project 'Add the requested tests and run the relevant test command.'
+& "$skillDir/scripts/run.ps1" -Dir C:/project -Session ses_example 'Explain the race you reported.'
 ```
 
-Run it with `pwsh -File` or `powershell -File` from Bash if that is the shell you have. `run.sh` also works under Git Bash, but its timeout cannot reliably stop a hung Node process there. Use forward slashes in `--dir` either way.
+On macOS/Linux/WSL:
 
-Always pass `--dir` explicitly with the absolute project path. The subagent only sees that directory.
+```bash
+skill_dir="${CODEX_HOME:-$HOME/.codex}/skills/deepseek-subagent"
+bash "$skill_dir/scripts/run.sh" --dir /absolute/project -o /scratch/result.md 'Review src/auth. Cite paths and lines; make no edits.'
+bash "$skill_dir/scripts/run.sh" --worker --dir /absolute/project 'Implement the bounded change and run its relevant tests.'
+bash "$skill_dir/scripts/run.sh" --dir /absolute/project -s ses_example 'Explain the finding in detail.'
+```
 
-## Choosing read-only vs worker
+For long briefs, attach an absolute file with -File (PowerShell) or -f (Bash) and pass a short instruction to read it. Defaults: read-only deepseek agent, model deepseek/deepseek-flash, timeout 900 seconds. Override with -Model / -m or DEEPSEEK_SUBAGENT_MODEL. -DryRun / --dry-run prints the command without an API call. -Json / -j returns structured output. See the README flag table for additional options.
 
-- **Read-only (`deepseek`)** is the default. Use it for anything whose output is text: findings, plans, summaries, reviews, answers.
-- **Worker (`deepseek-worker`)** may edit files and run shell commands, but is blocked from `git commit`, `git push`, `rm -rf`, and `sudo`. Use it only for well-specified, mechanical implementation work where you will review the diff afterwards. Never use it for anything destructive or irreversible.
+Use the shell execution tool available in the current Codex session. If it yields a running session ID, poll that same session using its associated tool (for example, exec_command then write_stdin). Distinguish this process handle from the OpenCode session ID in the final result. Do not use Claude's run_in_background parameter. Read logs with Get-Content -Tail 20 or tail -n 20 when progress is needed. For independent tasks, use distinct output/log paths and avoid overlapping worker edits; parallelize only within the session's authorization and limits.
 
-## Running in parallel
+## Brief and verify
 
-Each run is an independent process. For several independent tasks, launch several Bash calls with `run_in_background: true` in the same message, each writing to its own `-o` file, then read the files when they finish. Do not launch more than about 4 at once.
+Include the goal, deliverable, relevant paths, known findings, constraints, and verification command. The child does not see this conversation. Avoid secrets or unrelated private files. Record existing working-tree changes before a worker runs so you can distinguish its edits from the user's work.
 
-## Writing the brief
+Read the RESULT and check important claims against source files. Review worker diffs and run relevant checks. Do not discard existing user changes or blindly revert files to remove unwanted edits. Report what DeepSeek did, what you verified, and remaining uncertainty.
 
-The brief is the only context the subagent gets. It cannot ask questions and it cannot see this conversation. Include:
+Keep the returned session ID for corrections using -Session / -s, preserving directory, model, and worker mode as appropriate. A QUESTION section requests a turn-based reply; answer in the same session. Use -Fork / --fork with a session to branch its history. Start a fresh session for unrelated work. The parent routes information between children.
 
-1. The goal in one or two sentences, and the exact deliverable.
-2. Absolute or repo-relative paths of files and directories to look at. Do not paste whole files; point at them.
-3. What you already know or have ruled out, so it does not repeat that work.
-4. Constraints: what not to touch, what style to follow, what to skip.
-5. For workers: how to verify (which test command, which type check) and to report the real result.
-
-The agents are instructed to finish with a `RESULT` section. Ask for a specific shape if you need one (a list, a table, a patch description).
-
-## After it returns
-
-- Read the `RESULT` section, then check the claims against the code yourself before relaying them. Spot-check at least the `path:line` citations that matter.
-- For worker runs, run `git status` and `git diff` in `--dir` and review every change. Revert anything out of scope with `git checkout -- <file>`.
-- Report to the user what DeepSeek did and what you verified. Attribute it plainly: "the DeepSeek subagent found…". Do not present its output as your own verified work unless you checked it.
-- If the reply ends with a `QUESTION` section, answer it with `-s <session>` rather than re-briefing from scratch.
-- Exit code 124 means timeout. Exit 2 means bad arguments. Anything else non-zero is an OpenCode or API error; the output contains the message.
-
-## When not to use this
-
-- Tasks needing this conversation's context that you cannot compress into a brief.
-- Anything security-sensitive, destructive, or touching credentials.
-- Small lookups you can do in a couple of tool calls yourself.
-
-## Task
-
-$ARGUMENTS
+Nonzero exit means failure: 124 is timeout, 2 invalid arguments, 127 missing OpenCode. Inspect output before retrying. After a worker timeout or error, review partial changes first. Correct a concrete cause before retrying; report repeated failures instead of looping. Native Codex collaboration tools do not manage these external processes.

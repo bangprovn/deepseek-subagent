@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the deepseek-subagent skill's OpenCode side (macOS / Linux / Git Bash).
-# Run from the skill directory, e.g. ~/.claude/skills/deepseek-subagent/install.sh
+# Run from the skill directory, e.g. ~/.codex/skills/deepseek-subagent/install.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/agents"
@@ -21,4 +21,4 @@ else
   echo "DeepSeek credentials: missing. Run:  opencode auth login   and choose DeepSeek." >&2
 fi
 echo
-echo "Done. In Claude Code, type /deepseek-subagent <task> or ask it to 'use deepseek'."
+echo "Done. In Codex, ask it to 'use deepseek' or invoke the deepseek-subagent skill."

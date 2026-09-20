@@ -39,7 +39,7 @@ param(
   [switch]$Json,
   [switch]$Quiet,
   [switch]$DryRun,
-  [Parameter(ValueFromRemainingArguments = $true)]
+  [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
   [string[]]$Prompt
 )
 
@@ -58,6 +58,15 @@ if ([string]::IsNullOrWhiteSpace($text)) {
 $cmd = Get-Command opencode -ErrorAction SilentlyContinue
 if (-not $cmd) { [Console]::Error.WriteLine('error: opencode not found on PATH'); exit 127 }
 $exe = $cmd.Source
+# npm PowerShell shims cannot be launched with ProcessStartInfo.
+if ($exe -match '\.(ps1|cmd|bat)$') {
+  $native = Join-Path (Split-Path -Parent $exe) 'node_modules/opencode-ai/bin/opencode.exe'
+  if (Test-Path -LiteralPath $native) { $exe = $native }
+  elseif ($exe -match '\.ps1$') {
+    [Console]::Error.WriteLine('error: only an OpenCode PowerShell shim was found; install the native OpenCode executable on PATH')
+    exit 127
+  }
+}
 # An npm .cmd shim goes through cmd.exe, which mangles &, |, %, ^ and newlines in
 # arguments. In that case ship the brief as an attached file instead of inline.
 $viaShim = $exe -match '\.(cmd|bat)$'
@@ -67,7 +76,7 @@ try { $Dir = (Resolve-Path -LiteralPath $Dir).Path } catch {
 }
 
 # --- build args ---------------------------------------------------------------
-$ocArgs = @('run', '--format', 'json', '--agent', $Agent, '--model', $Model, '--dir', $Dir, '--title', 'claude-subagent')
+$ocArgs = @('run', '--format', 'json', '--agent', $Agent, '--model', $Model, '--dir', $Dir, '--title', 'deepseek-subagent')
 if ($Session) { $ocArgs += @('--session', $Session); if ($Fork) { $ocArgs += '--fork' } }
 foreach ($f in $File) { $ocArgs += @('--file', $f) }
 
